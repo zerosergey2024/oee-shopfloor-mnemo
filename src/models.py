@@ -26,3 +26,18 @@ class MachineOverview(BaseModel):
     # DOWN
     down_start_ts: Optional[datetime] = None
     down_reason: DownReason = None
+
+from typing import Optional, Literal
+from datetime import datetime
+
+StopReason = Literal["MICROSTOP", "SETUP", "FAULT", "MAINT", "REPAIR"]
+
+class StopEvent(BaseModel):
+    start: datetime
+    end: datetime
+    reason: StopReason
+    note: Optional[str] = None
+
+    @property
+    def duration_min(self) -> float:
+        return round((self.end - self.start).total_seconds() / 60.0, 1)

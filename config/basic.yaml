@@ -1,0 +1,5 @@
+level: BASIC
+provider: mock_basic
+oee_granularity: shift_15min
+refresh_seconds: 0
+enable_ai: false

@@ -1,0 +1,5 @@
+level: ADVANCED
+provider: iot_advanced_stub
+oee_granularity: shift_15min
+refresh_seconds: 5
+enable_ai: true

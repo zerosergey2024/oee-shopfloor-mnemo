@@ -1,0 +1,5 @@
+level: STANDARD
+provider: mes_standard_stub
+oee_granularity: shift_15min
+refresh_seconds: 10
+enable_ai: false

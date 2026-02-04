@@ -70,7 +70,6 @@ def generate_telemetry_df(
         ).set_index("timestamp")
         return df
 
-
     # Редкие “рывки”/аномалии для демо (только RUN)
     spikes = np.zeros(n)
     if state == "RUN":

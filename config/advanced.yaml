@@ -3,3 +3,10 @@ provider: iot_advanced_stub
 oee_granularity: shift_15min
 refresh_seconds: 5
 enable_ai: true
+features:
+  telemetry: true
+economics:
+  planned_units_per_shift: 18000
+  shift_hours: 8
+  margin_per_unit: 0.18
+  currency: USD

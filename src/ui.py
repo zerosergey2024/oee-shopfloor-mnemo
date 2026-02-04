@@ -1,22 +1,24 @@
 from __future__ import annotations
 
-import streamlit as st
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Union
+
 import pandas as pd
+import streamlit as st
 
 from .models import MachineOverview, StopEvent
 from .telemetry.simulator import (
     TelemetryThresholds,
-    generate_telemetry_df,
     compute_alarms,
+    generate_telemetry_df,
     summarize_telemetry,
 )
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 COLOR = {
-    "RUN":  "#2ecc71",
+    "RUN": "#2ecc71",
     "IDLE": "#95a5a6",
     "DOWN": "#e74c3c",
 }
@@ -44,24 +46,29 @@ SVG_MAP = {
 
 def tooltip_text(m: MachineOverview) -> str:
     header = f"[{m.name} {m.machine_id}]"
+
     if m.state in ("RUN", "IDLE"):
-        return "\n".join([
-            header,
-            f"{'🟢' if m.state=='RUN' else '⚪'} {STATE_LABEL[m.state]}",
-            f"Смена: {m.shift.start:%H:%M} - {m.shift.end:%H:%M}",
-            f"Остановок: {m.stops_count}",
-            f"Время работы: {m.run_time_hours:.1f} ч из {m.planned_time_hours:.1f} ч",
-            f"OEE: {m.oee_percent:.1f}%" if m.oee_percent is not None else "OEE: —"
-        ])
+        return "\n".join(
+            [
+                header,
+                f"{'🟢' if m.state == 'RUN' else '⚪'} {STATE_LABEL[m.state]}",
+                f"Смена: {m.shift.start:%H:%M} - {m.shift.end:%H:%M}",
+                f"Остановок: {m.stops_count}",
+                f"Время работы: {m.run_time_hours:.1f} ч из {m.planned_time_hours:.1f} ч",
+                f"OEE: {m.oee_percent:.1f}%" if m.oee_percent is not None else "OEE: —",
+            ]
+        )
 
     down_ts = f"{m.down_start_ts:%Y-%m-%d %H:%M}" if m.down_start_ts else "—"
     reason = "ТО" if m.down_reason == "MAINT" else ("Ремонт" if m.down_reason == "REPAIR" else "—")
-    return "\n".join([
-        header,
-        "🔴 РЕМОНТ / ТО",
-        f"Останов: {down_ts}",
-        f"Причина: {reason}",
-    ])
+    return "\n".join(
+        [
+            header,
+            "🔴 РЕМОНТ / ТО",
+            f"Останов: {down_ts}",
+            f"Причина: {reason}",
+        ]
+    )
 
 
 def load_svg(kind: str, color: str) -> str:
@@ -71,10 +78,6 @@ def load_svg(kind: str, color: str) -> str:
 
 
 def render_mnemo_selectable(machines: List[MachineOverview], selected_id: Optional[str]) -> str:
-    """
-    Рендерим мнемосхему через Streamlit компоненты + кнопки выбора.
-    Возвращает machine_id выбранного станка (или текущий).
-    """
     cols = st.columns(len(machines))
     new_selected = selected_id
 
@@ -101,7 +104,11 @@ def render_mnemo_selectable(machines: List[MachineOverview], selected_id: Option
     return new_selected
 
 
-def render_machine_panel(machine: MachineOverview, df_oee, stops: List[StopEvent]):
+def render_machine_panel(
+    machine: MachineOverview,
+    df_oee: Union[pd.DataFrame, Dict[str, Any], List[Dict[str, Any]]],
+    stops: List[StopEvent],
+) -> None:
     st.subheader("Карточка оборудования")
     st.code(tooltip_text(machine), language="text")
 
@@ -123,7 +130,6 @@ def render_machine_panel(machine: MachineOverview, df_oee, stops: List[StopEvent
         df_oee["timestamp"] = pd.to_datetime(df_oee["timestamp"])
         df_oee = df_oee.set_index("timestamp")
 
-    # Нормализация имени колонки OEE
     col_candidates = ["oee_percent", "OEE_percent", "oee", "OEE"]
     oee_col = next((c for c in col_candidates if c in df_oee.columns), None)
 
@@ -134,16 +140,30 @@ def render_machine_panel(machine: MachineOverview, df_oee, stops: List[StopEvent
 
     st.subheader("Остановки")
     if stops:
+        # последние сверху
+        stops_sorted = sorted(stops, key=lambda s: s.start, reverse=True)
+
         rows = []
-        for s in stops:
-            end_str = s.end.strftime("%H:%M") if s.end else "—"
-            rows.append({
-                "Начало": s.start.strftime("%H:%M"),
-                "Конец": end_str,
-                "Длительность, мин": getattr(s, "duration_min", None),
-                "Причина": REASON_LABEL.get(s.reason, s.reason),
-                "Комментарий": s.note or "",
-            })
+        for s in stops_sorted:
+            end_ts = getattr(s, "end", None)
+            end_str = end_ts.strftime("%H:%M") if end_ts else "—"
+
+            if getattr(s, "duration_min", None) is not None:
+                dur = s.duration_min
+            else:
+                end_for_calc = end_ts or datetime.now()
+                dur = int((end_for_calc - s.start).total_seconds() // 60)
+
+            rows.append(
+                {
+                    "Начало": s.start.strftime("%H:%M"),
+                    "Конец": end_str,
+                    "Длительность, мин": dur,
+                    "Причина": REASON_LABEL.get(s.reason, s.reason),
+                    "Комментарий": getattr(s, "note", "") or "",
+                }
+            )
+
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
         st.caption("Остановок за смену не зарегистрировано.")
@@ -157,19 +177,109 @@ def _badge(status: str) -> str:
     return "🟢 OK"
 
 
-def render_telemetry_panel(machine: MachineOverview, cfg: dict):
-    """
-    Показ “датчиков/PLC” в демо-режиме (симуляция).
-    """
+def _inject_alarm_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        .alarm-row { display:flex; align-items:center; gap:12px; margin: 6px 0 12px 0; }
+        .estop {
+            width: 92px; height: 92px; border-radius: 999px;
+            display:flex; align-items:center; justify-content:center;
+            font-weight: 900; font-size: 12px; letter-spacing: 1px;
+            user-select:none;
+        }
+        .estop-red {
+            background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.35), rgba(231,76,60,0.85));
+            border: 2px solid rgba(231,76,60,0.95);
+            box-shadow: 0 0 0 0 rgba(231,76,60,0.65);
+            animation: pulse 1.1s infinite;
+            color: #fff;
+        }
+        .estop-orange {
+            background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.35), rgba(243,156,18,0.85));
+            border: 2px solid rgba(243,156,18,0.95);
+            color: #1a1a1a;
+        }
+        .estop-ok {
+            background: rgba(46, 204, 113, 0.18);
+            border: 1px solid rgba(46, 204, 113, 0.35);
+            color: rgba(230, 255, 240, 0.95);
+        }
+        .alarm-banner {
+            flex: 1;
+            padding: 12px 14px;
+            border-radius: 12px;
+            font-weight: 800;
+            letter-spacing: 0.3px;
+            text-align: left;
+        }
+        .banner-red {
+            background: rgba(231,76,60,0.20);
+            border: 1px solid rgba(231,76,60,0.55);
+            color: #ffdad6;
+        }
+        .banner-orange {
+            background: rgba(243,156,18,0.18);
+            border: 1px solid rgba(243,156,18,0.55);
+            color: #ffe8bd;
+        }
+        .banner-ok {
+            background: rgba(46, 204, 113, 0.12);
+            border: 1px solid rgba(46, 204, 113, 0.28);
+            color: rgba(230, 255, 240, 0.95);
+        }
+        @keyframes pulse {
+            0%   { box-shadow: 0 0 0 0 rgba(231,76,60,0.65); }
+            70%  { box-shadow: 0 0 0 14px rgba(231,76,60,0.0); }
+            100% { box-shadow: 0 0 0 0 rgba(231,76,60,0.0); }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_estop(has_alarm: bool, has_warn: bool, hint: str) -> None:
+    _inject_alarm_styles()
+
+    if has_alarm:
+        estop_class = "estop estop-red"
+        banner_class = "alarm-banner banner-red"
+        title = "АВАРИЯ: превышение порогов"
+    elif has_warn:
+        estop_class = "estop estop-orange"
+        banner_class = "alarm-banner banner-orange"
+        title = "ПРЕДУПРЕЖДЕНИЕ: близко к порогам"
+    else:
+        estop_class = "estop estop-ok"
+        banner_class = "alarm-banner banner-ok"
+        title = "OK: критических превышений нет"
+
+    st.markdown(
+        f"""
+        <div class="alarm-row">
+            <div class="{estop_class}" title="Демо-индикатор, без управления">E-STOP</div>
+            <div class="{banner_class}">
+                <div style="font-size:14px; font-weight:900; margin-bottom:2px;">{title}</div>
+                <div style="font-size:12px; opacity:0.95;">{hint}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_telemetry_panel(
+    machine: MachineOverview,
+    cfg: dict,
+    stops: Optional[List[StopEvent]] = None,
+) -> None:
     st.subheader("Датчики / PLC (DEMO)")
 
     level = cfg.get("level", "BASIC")
     state = getattr(machine, "state", "RUN")
-    if state == "DOWN":
-        st.warning("Оборудование в ремонте/ТО. Датчики отключены — телеметрия недоступна.")
 
-
-    # Кэшируем, чтобы при каждом rerun не “скакали” графики
+    # кэш, чтобы не "скакало"
     cache_key = f"telemetry::{level}::{machine.machine_id}::{state}"
     if cache_key not in st.session_state:
         df = generate_telemetry_df(machine.machine_id, level=level, state=state, minutes=240, step_sec=30)
@@ -177,11 +287,47 @@ def render_telemetry_panel(machine: MachineOverview, cfg: dict):
     else:
         df = st.session_state[cache_key]
 
+    # --- cutoff: обрыв телеметрии при IDLE/DOWN ---
+    cutoff_ts = None
+    if state == "DOWN" and getattr(machine, "down_start_ts", None):
+        cutoff_ts = pd.to_datetime(machine.down_start_ts)
+
+    if state == "IDLE" and stops:
+        open_stop = next((s for s in stops if getattr(s, "end", None) is None), None)
+        if open_stop:
+            cutoff_ts = pd.to_datetime(open_stop.start)
+        else:
+            last_stop = max(stops, key=lambda s: s.start, default=None)
+            if last_stop:
+                cutoff_ts = pd.to_datetime(last_stop.start)
+
+    if cutoff_ts is not None:
+        df = df.copy()
+        df.loc[df.index >= cutoff_ts, ["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]] = pd.NA
+
+    # если данных нет — показываем и выходим
+    if df[["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]].dropna(how="all").empty:
+        if state == "DOWN":
+            st.warning("Оборудование в ремонте/ТО. Датчики отключены — телеметрия недоступна.")
+        else:
+            st.info("Нет телеметрии за период (нет связи/данных).")
+        return
+
     thr = TelemetryThresholds()
     alarms = compute_alarms(df, thr)
     summary = summarize_telemetry(df)
 
-    def fmt(x, fmt_str):
+    # --- E-STOP индикатор ---
+    has_alarm = any(v == "alarm" for v in alarms.values())
+    has_warn = any(v == "warn" for v in alarms.values())
+
+    hint = f"Станок: {machine.machine_id} • Состояние: {STATE_LABEL.get(state, state)}"
+    if cutoff_ts is not None:
+        hint += f" • Отсечка телеметрии: {cutoff_ts:%H:%M}"
+
+    _render_estop(has_alarm, has_warn, hint)
+
+    def fmt(x: Any, fmt_str: str) -> str:
         return "—" if pd.isna(x) else fmt_str.format(x)
 
     c1, c2, c3 = st.columns(3)
@@ -190,9 +336,6 @@ def render_telemetry_panel(machine: MachineOverview, cfg: dict):
     c3.metric("Ток, pu", fmt(summary["current_last"], "{:.2f}"), _badge(alarms["current"]))
 
     st.caption("Сигналы симулируются. В ADVANCED больше аномалий для демонстрации диагностики.")
-    if df[["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]].dropna(how="all").empty:
-        st.info("Нет телеметрии за период (нет связи/данных).")
-        return
 
     st.line_chart(df[["vibration_mm_s"]], height=160)
     st.line_chart(df[["bearing_temp_c"]], height=160)
@@ -209,5 +352,4 @@ def render_telemetry_panel(machine: MachineOverview, cfg: dict):
                 "current_alarm": thr.current_alarm,
             }
         )
-
 

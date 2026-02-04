@@ -3,3 +3,10 @@ provider: mock_basic
 oee_granularity: shift_15min
 refresh_seconds: 0
 enable_ai: false
+features:
+  telemetry: false
+economics:
+  planned_units_per_shift: 18000
+  shift_hours: 8
+  margin_per_unit: 0.18
+  currency: USD

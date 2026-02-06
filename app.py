@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from uuid import uuid4
+import time
+from src.integrations.dispatcher import dispatch_send_request
 
 import pandas as pd
 import requests
@@ -502,89 +504,162 @@ with right:
                 st.code(json.dumps(asdict(last_req), ensure_ascii=False, indent=2), language="json")
 
     # ============================
-    # Integration panels (view-only)
-    # ============================
-    st.divider()
-    if mode == "erp":
-        st.subheader("Интеграция с ERP/1С (MOCK API)")
-        st.caption(f"ERP endpoint: {ERP_URL}")
+# ============================
+# Integrations (delivery + status)
+# ============================
+import time
+import os
+import requests
 
-        # оставим “инбокс” как debug
-        if st.button("Показать inbox ERP", use_container_width=True):
-            try:
-                r = requests.get(f"{ERP_URL}/api/v1/inbox", timeout=6)
-                r.raise_for_status()
-                st.json(r.json())
-            except Exception as e:
-                st.error(f"Не удалось прочитать inbox: {e}")
-    else:
-        st.subheader("Интеграция (Google)")
-        st.caption("BASIC: заявка → Google Sheets, график ТО → Google Calendar.")
-        if st.session_state.last_delivery:
-            st.json(st.session_state.last_delivery)
+from src.integrations.dispatcher import dispatch_send_request
+
+# ---- init ----
+if "last_delivery" not in st.session_state:
+    st.session_state.last_delivery = None
+
+mode = str((cfg.get("integrations", {}) or {}).get("mode", "erp")).lower()
+ERP_URL = os.environ.get("ERP_URL", "http://127.0.0.1:8008")
 
 # ============================
-# ERP Status block (ONLY if mode=erp and last request delivered to ERP)
+# Integration panels (view-only)
+# ============================
+st.divider()
+
+if mode == "erp":
+    st.subheader("Интеграция с ERP/1С (MOCK API)")
+    st.caption(f"ERP endpoint: {ERP_URL}")
+
+    if st.button("Показать inbox ERP", width="stretch"):
+        try:
+            r = requests.get(f"{ERP_URL}/api/v1/inbox", timeout=6)
+            r.raise_for_status()
+            st.json(r.json())
+        except Exception as e:
+            st.error(f"Не удалось прочитать inbox: {e}")
+else:
+    st.subheader("Интеграция (Google)")
+    st.caption("BASIC: заявка → Google Sheets, график ТО → Google Calendar.")
+    if st.session_state.get("last_delivery"):
+        st.json(st.session_state.last_delivery)
+
+# ============================
+# Delivery
+# ============================
+st.divider()
+st.subheader("Доставка заявки (интеграции)")
+
+if not st.session_state.maintenance_requests:
+    st.info("Заявок ещё нет — сначала создайте заявку ТО.")
+else:
+    last_req = st.session_state.maintenance_requests[0]
+
+    if st.button("Отправить заявку", width="stretch"):
+        try:
+            delivery = dispatch_send_request(last_req, cfg)
+            st.session_state.last_delivery = delivery
+
+            if not delivery.get("ok"):
+                st.error("Доставка не удалась")
+                st.json(delivery)
+            else:
+                if delivery.get("target") == "erp_1c":
+                    erp_id = (delivery.get("erp") or {}).get("erp_id")
+                    st.success(f"Отправлено в ERP ✅ ERP_ID = {erp_id}")
+
+                    with st.spinner("Ожидаем регистрацию в 1С..."):
+                        time.sleep(2.5)
+
+                    reg = delivery.get("registered") or {}
+                    st.info(
+                        f"Зарегистрировано в 1С: {reg.get('zn_number')} "
+                        f"от {reg.get('date')}"
+                    )
+
+                    exch = delivery.get("exchange") or {}
+                    st.caption(f"Файл обмена: `{exch.get('path')}`")
+
+                elif delivery.get("target") == "google":
+                    st.success("Доставка: GOOGLE")
+                    st.json(delivery)
+                else:
+                    st.success("Доставка выполнена")
+                    st.json(delivery)
+
+        except Exception as e:
+            st.error(f"Доставка не удалась: {e}")
+
+# ============================
+# ERP Status block
 # ============================
 st.divider()
 st.subheader("Статус заявки")
 
 if not st.session_state.maintenance_requests:
     st.info("Заявок ещё нет — сначала создайте заявку ТО.")
-    st.stop()
+else:
+    last_req = st.session_state.maintenance_requests[0]
 
-last_req = st.session_state.maintenance_requests[0]
-
-if mode != "erp":
-    st.info("Статусы доступны только в режимах STANDARD/ADVANCED (mode=erp).")
-    st.stop()
-
-if last_req.delivery_target != "ERP":
-    st.info("Заявка ещё не доставлена в ERP — статусы недоступны.")
-    if last_req.delivery_error:
-        st.error(last_req.delivery_error)
-    st.stop()
-
-# подтянуть текущий статус из ERP
-try:
-    r = requests.get(f"{ERP_URL}/api/v1/maintenance_requests/{last_req.request_id}", timeout=6)
-    if r.status_code == 200:
-        doc = r.json()
-        current_status = doc.get("status", "NEW")
-        st.write(f"Текущий статус: **{current_status}** (ERP_ID: `{doc.get('erp_id')}`)")
+    if mode != "erp":
+        st.info("Статусы доступны только в режимах STANDARD/ADVANCED (mode=erp).")
     else:
-        current_status = "—"
-        st.caption("Заявка ещё не найдена в ERP (возможна задержка/ошибка).")
-        doc = None
-except Exception as e:
-    current_status = "—"
-    doc = None
-    st.error(f"ERP недоступен: {e}")
-
-# смена статуса
-new_status = st.selectbox("Установить статус", ["NEW", "IN_PROGRESS", "DONE", "CANCELLED"], index=0)
-note = st.text_input("Комментарий к статусу (опционально)", value="")
-
-if st.button("Обновить статус в ERP", use_container_width=True):
-    try:
-        rr = requests.patch(
-            f"{ERP_URL}/api/v1/maintenance_requests/{last_req.request_id}/status",
-            json={"status": new_status, "note": note or None},
-            timeout=6,
+        delivery = st.session_state.get("last_delivery") or {}
+        delivered_to_erp = (
+            delivery.get("target") == "erp_1c"
+            and (delivery.get("erp") or {}).get("erp_id") is not None
         )
-        rr.raise_for_status()
-        st.success(f"Статус обновлён: {new_status}")
-    except Exception as e:
-        st.error(f"Не удалось обновить статус: {e}")
 
-# история
-if st.button("Показать историю статусов", use_container_width=True):
-    try:
-        rr = requests.get(f"{ERP_URL}/api/v1/maintenance_requests/{last_req.request_id}/history", timeout=6)
-        rr.raise_for_status()
-        st.json(rr.json())
-    except Exception as e:
-        st.error(f"Не удалось получить историю: {e}")
+        if not delivered_to_erp:
+            st.info("Заявка ещё не доставлена в ERP — статусы недоступны.")
+        else:
+            # текущий статус
+            try:
+                r = requests.get(
+                    f"{ERP_URL}/api/v1/maintenance_requests/{last_req.request_id}",
+                    timeout=6,
+                )
+                if r.status_code == 200:
+                    doc = r.json()
+                    current_status = doc.get("status", "NEW")
+                    st.write(
+                        f"Текущий статус: **{current_status}** "
+                        f"(ERP_ID: `{doc.get('erp_id')}`)"
+                    )
+                else:
+                    st.caption("Заявка ещё не найдена в ERP (возможна задержка).")
+            except Exception as e:
+                st.error(f"ERP недоступен: {e}")
+
+            # смена статуса
+            new_status = st.selectbox(
+                "Установить статус",
+                ["NEW", "IN_PROGRESS", "DONE", "CANCELLED"],
+                index=0,
+            )
+            note = st.text_input("Комментарий к статусу (опционально)", value="")
+
+            if st.button("Обновить статус в ERP", width="stretch"):
+                try:
+                    rr = requests.patch(
+                        f"{ERP_URL}/api/v1/maintenance_requests/{last_req.request_id}/status",
+                        json={"status": new_status, "note": note or None},
+                        timeout=6,
+                    )
+                    rr.raise_for_status()
+                    st.success(f"Статус обновлён: {new_status}")
+                except Exception as e:
+                    st.error(f"Не удалось обновить статус: {e}")
+
+            if st.button("Показать историю статусов", width="stretch"):
+                try:
+                    rr = requests.get(
+                        f"{ERP_URL}/api/v1/maintenance_requests/{last_req.request_id}/history",
+                        timeout=6,
+                    )
+                    rr.raise_for_status()
+                    st.json(rr.json())
+                except Exception as e:
+                    st.error(f"Не удалось получить историю: {e}")
+
 
 
 

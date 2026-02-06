@@ -1,3 +1,7 @@
+secrets/
+*.json
+**/google-service-account.json
+
 # Python
 __pycache__/
 *.py[cod]

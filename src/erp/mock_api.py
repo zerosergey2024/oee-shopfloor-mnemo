@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -12,13 +13,10 @@ Status = Literal["NEW", "IN_PROGRESS", "DONE", "CANCELLED"]
 STORE: Dict[str, Dict[str, Any]] = {}          # request_id -> document
 HISTORY: Dict[str, List[Dict[str, Any]]] = {}  # request_id -> events
 
-# Память процесса (для демо достаточно)
-INBOX: List[Dict[str, Any]] = []
-
 
 class MaintenanceRequestIn(BaseModel):
     request_id: str
-    created_at: str
+    created_at: datetime
     machine_id: str
     priority: str
     work_type: str
@@ -35,7 +33,6 @@ class MaintenanceRequestOut(BaseModel):
     status: Status
 
 
-
 @app.get("/health")
 def health():
     return {"ok": True, "ts": datetime.now().isoformat(timespec="seconds")}
@@ -43,11 +40,15 @@ def health():
 
 @app.post("/api/v1/maintenance_requests", response_model=MaintenanceRequestOut)
 def create_request(req: MaintenanceRequestIn):
+    if req.request_id in STORE:
+        raise HTTPException(status_code=409, detail="request_id already exists")
+
     received_at = datetime.now().isoformat(timespec="seconds")
     erp_id = f"ERP-{len(STORE) + 1:06d}"
 
     doc = req.model_dump()
     doc.update({
+        "created_at": req.created_at.isoformat(timespec="seconds"),
         "erp_id": erp_id,
         "received_at": received_at,
         "status": "NEW",
@@ -68,6 +69,7 @@ def inbox():
     items = list(STORE.values())
     items.sort(key=lambda x: x.get("received_at", ""), reverse=True)
     return {"count": len(items), "items": items[:50]}
+
 
 @app.get("/api/v1/maintenance_requests/{request_id}")
 def get_request(request_id: str):
@@ -93,6 +95,8 @@ def update_status(request_id: str, upd: StatusUpdateIn):
     doc["status_updated_at"] = ts
     if upd.note:
         doc["status_note"] = upd.note
+    else:
+        doc.pop("status_note", None)
 
     HISTORY.setdefault(request_id, []).append({
         "ts": ts,
@@ -102,6 +106,7 @@ def update_status(request_id: str, upd: StatusUpdateIn):
     })
 
     return {"ok": True, "request_id": request_id, "status": upd.status, "ts": ts}
+
 
 @app.get("/api/v1/maintenance_requests/{request_id}/history")
 def get_history(request_id: str):
@@ -117,4 +122,5 @@ def root():
         "ok": True,
         "endpoints": ["/health", "/api/v1/maintenance_requests", "/api/v1/inbox"],
     }
+
 

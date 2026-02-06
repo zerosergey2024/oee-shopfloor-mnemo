@@ -1,12 +1,26 @@
 level: BASIC
+
 provider: mock_basic
-oee_granularity: shift_15min
-refresh_seconds: 0
-enable_ai: false
+
 features:
-  telemetry: false
+  telemetry: true
+
 economics:
-  planned_units_per_shift: 18000
+  planned_units_per_shift: 1000
   shift_hours: 8
-  margin_per_unit: 0.18
-  currency: USD
+  margin_per_unit: 2.5
+  currency: EUR
+
+integrations:
+  mode: google
+  target: google_sheets
+  google_sheets:
+    credentials_json_path: "secrets/heroic-bucksaw-468218-e4-32267061be60.json"
+    spreadsheet_id: "1c7JSemm_YYhxuQldn_WeX61H-ViB6iBxGCB8oksOai4"
+    worksheet_title: "maintenance_requests"
+  google_calendar:
+    credentials_json_path: "secrets/heroic-bucksaw-468218-e4-32267061be60.json"
+    calendar_id: "8175a2e5cc0ff8f2d39554e8f6cb00a7fa819e6f046a8fbc7bd0c6c1ce91444f@group.calendar.google.com"
+    default_duration_min: 120
+
+

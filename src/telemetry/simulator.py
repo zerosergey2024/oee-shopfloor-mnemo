@@ -112,7 +112,11 @@ def compute_alarms(df: pd.DataFrame, thr: TelemetryThresholds) -> Dict[str, str]
             return "warn"
         return "ok"
 
-    last = df.iloc[-1]
+    last_valid = df[["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]].dropna(how="any").tail(1)
+    if last_valid.empty:
+        return {"vibration": "ok", "temperature": "ok", "current": "ok"}
+
+    last = last_valid.iloc[0]
     return {
         "vibration": status(float(last["vibration_mm_s"]), thr.vibration_warn, thr.vibration_alarm),
         "temperature": status(float(last["bearing_temp_c"]), thr.temp_warn, thr.temp_alarm),
@@ -121,12 +125,23 @@ def compute_alarms(df: pd.DataFrame, thr: TelemetryThresholds) -> Dict[str, str]
 
 
 def summarize_telemetry(df: pd.DataFrame) -> Dict[str, float]:
-    last = df.iloc[-1]
+    cols = ["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]
+    last_valid = df[cols].dropna(how="any").tail(1)
+    if last_valid.empty:
+        return {
+            "vibration_last": float("nan"),
+            "temp_last": float("nan"),
+            "current_last": float("nan"),
+            "vibration_max": float(df["vibration_mm_s"].max(skipna=True)),
+            "temp_max": float(df["bearing_temp_c"].max(skipna=True)),
+            "current_max": float(df["motor_current_pu"].max(skipna=True)),
+        }
+    last = last_valid.iloc[0]
     return {
         "vibration_last": float(last["vibration_mm_s"]),
         "temp_last": float(last["bearing_temp_c"]),
         "current_last": float(last["motor_current_pu"]),
-        "vibration_max": float(df["vibration_mm_s"].max()),
-        "temp_max": float(df["bearing_temp_c"].max()),
-        "current_max": float(df["motor_current_pu"].max()),
+        "vibration_max": float(df["vibration_mm_s"].max(skipna=True)),
+        "temp_max": float(df["bearing_temp_c"].max(skipna=True)),
+        "current_max": float(df["motor_current_pu"].max(skipna=True)),
     }

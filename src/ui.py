@@ -44,35 +44,45 @@ SVG_MAP = {
 }
 
 
+# ============================
+# Mnemo helpers
+# ============================
 def tooltip_text(m: MachineOverview) -> str:
     header = f"[{m.name} {m.machine_id}]"
 
     if m.state in ("RUN", "IDLE"):
+        # аккуратная защита от не-datetime
+        try:
+            shift_start = getattr(m.shift, "start", None)
+            shift_end = getattr(m.shift, "end", None)
+            shift_str = f"{shift_start:%H:%M} - {shift_end:%H:%M}"
+        except Exception:
+            shift_str = "—"
+
         return "\n".join(
             [
                 header,
-                f"{'🟢' if m.state == 'RUN' else '⚪'} {STATE_LABEL[m.state]}",
-                f"Смена: {m.shift.start:%H:%M} - {m.shift.end:%H:%M}",
-                f"Остановок: {m.stops_count}",
-                f"Время работы: {m.run_time_hours:.1f} ч из {m.planned_time_hours:.1f} ч",
+                f"{'🟢' if m.state == 'RUN' else '⚪'} {STATE_LABEL.get(m.state, m.state)}",
+                f"Смена: {shift_str}",
+                f"Остановок: {getattr(m, 'stops_count', 0)}",
+                f"Время работы: {getattr(m, 'run_time_hours', 0.0):.1f} ч из {getattr(m, 'planned_time_hours', 0.0):.1f} ч",
                 f"OEE: {m.oee_percent:.1f}%" if m.oee_percent is not None else "OEE: —",
             ]
         )
 
-    down_ts = f"{m.down_start_ts:%Y-%m-%d %H:%M}" if m.down_start_ts else "—"
-    reason = "ТО" if m.down_reason == "MAINT" else ("Ремонт" if m.down_reason == "REPAIR" else "—")
-    return "\n".join(
-        [
-            header,
-            "🔴 РЕМОНТ / ТО",
-            f"Останов: {down_ts}",
-            f"Причина: {reason}",
-        ]
-    )
+    try:
+        down_ts = f"{m.down_start_ts:%Y-%m-%d %H:%M}" if m.down_start_ts else "—"
+    except Exception:
+        down_ts = "—"
+
+    reason = "ТО" if getattr(m, "down_reason", None) == "MAINT" else ("Ремонт" if getattr(m, "down_reason", None) == "REPAIR" else "—")
+    return "\n".join([header, "🔴 РЕМОНТ / ТО", f"Останов: {down_ts}", f"Причина: {reason}"])
 
 
 def load_svg(kind: str, color: str) -> str:
-    svg_file = BASE_DIR / "assets" / "silhouettes" / SVG_MAP[kind]
+    # безопасный fallback, чтобы UI не падал из-за нового типа станка
+    fname = SVG_MAP.get(kind, "cnc_mill.svg")
+    svg_file = BASE_DIR / "assets" / "silhouettes" / fname
     svg = svg_file.read_text(encoding="utf-8")
     return svg.replace("CURRENT_COLOR", color)
 
@@ -83,7 +93,7 @@ def render_mnemo_selectable(machines: List[MachineOverview], selected_id: Option
 
     for col, m in zip(cols, machines):
         with col:
-            svg = load_svg(m.kind, COLOR[m.state])
+            svg = load_svg(getattr(m, "kind", "Фрезерный ЧПУ"), COLOR.get(m.state, "#95a5a6"))
             tooltip = tooltip_text(m).replace("\n", "&#10;")
 
             is_selected = (m.machine_id == selected_id)
@@ -104,6 +114,9 @@ def render_mnemo_selectable(machines: List[MachineOverview], selected_id: Option
     return new_selected
 
 
+# ============================
+# Machine panel
+# ============================
 def render_machine_panel(
     machine: MachineOverview,
     df_oee: Union[pd.DataFrame, Dict[str, Any], List[Dict[str, Any]]],
@@ -124,11 +137,10 @@ def render_machine_panel(
         st.error(f"df_oee должен быть pandas.DataFrame, но пришёл: {type(df_oee)}")
         return
 
-    # timestamp -> index (если присутствует)
     if "timestamp" in df_oee.columns:
         df_oee = df_oee.copy()
-        df_oee["timestamp"] = pd.to_datetime(df_oee["timestamp"])
-        df_oee = df_oee.set_index("timestamp")
+        df_oee["timestamp"] = pd.to_datetime(df_oee["timestamp"], errors="coerce")
+        df_oee = df_oee.dropna(subset=["timestamp"]).set_index("timestamp")
 
     col_candidates = ["oee_percent", "OEE_percent", "oee", "OEE"]
     oee_col = next((c for c in col_candidates if c in df_oee.columns), None)
@@ -140,9 +152,7 @@ def render_machine_panel(
 
     st.subheader("Остановки")
     if stops:
-        # последние сверху
         stops_sorted = sorted(stops, key=lambda s: s.start, reverse=True)
-
         rows = []
         for s in stops_sorted:
             end_ts = getattr(s, "end", None)
@@ -169,6 +179,9 @@ def render_machine_panel(
         st.caption("Остановок за смену не зарегистрировано.")
 
 
+# ============================
+# Telemetry panel (CLEAN)
+# ============================
 def _badge(status: str) -> str:
     if status == "alarm":
         return "🔴 ALARM"
@@ -269,11 +282,34 @@ def _render_estop(has_alarm: bool, has_warn: bool, hint: str) -> None:
     )
 
 
+def _apply_cutoff(df: pd.DataFrame, cutoff_ts: Optional[pd.Timestamp]) -> pd.DataFrame:
+    if cutoff_ts is None:
+        return df
+    df2 = df.copy()
+    df2.loc[df2.index >= cutoff_ts, ["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]] = pd.NA
+    return df2
+
+
+def _last_valid_row(df: pd.DataFrame) -> Optional[pd.Series]:
+    cols = ["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]
+    last_valid = df[cols].dropna(how="any").tail(1)
+    if last_valid.empty:
+        return None
+    return last_valid.iloc[0]
+
+
 def render_telemetry_panel(
     machine: MachineOverview,
     cfg: dict,
     stops: Optional[List[StopEvent]] = None,
 ) -> None:
+    """
+    Чистая версия панели:
+    - стабильный кэш по (level, machine_id, state)
+    - корректная отсечка телеметрии при IDLE/DOWN
+    - устойчивость к NA в последних строках после cutoff
+    - статус (OK/WARN/ALARM) показываем НЕ через delta у metric, а отдельной строкой
+    """
     st.subheader("Датчики / PLC (DEMO)")
 
     level = cfg.get("level", "BASIC")
@@ -282,10 +318,15 @@ def render_telemetry_panel(
     # кэш, чтобы не "скакало"
     cache_key = f"telemetry::{level}::{machine.machine_id}::{state}"
     if cache_key not in st.session_state:
-        df = generate_telemetry_df(machine.machine_id, level=level, state=state, minutes=240, step_sec=30)
-        st.session_state[cache_key] = df
-    else:
-        df = st.session_state[cache_key]
+        st.session_state[cache_key] = generate_telemetry_df(
+            machine.machine_id,
+            level=level,
+            state=state,
+            minutes=240,
+            step_sec=30,
+        )
+
+    df = st.session_state[cache_key]
 
     # --- cutoff: обрыв телеметрии при IDLE/DOWN ---
     cutoff_ts = None
@@ -301,21 +342,31 @@ def render_telemetry_panel(
             if last_stop:
                 cutoff_ts = pd.to_datetime(last_stop.start)
 
-    if cutoff_ts is not None:
-        df = df.copy()
-        df.loc[df.index >= cutoff_ts, ["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]] = pd.NA
+    df = _apply_cutoff(df, cutoff_ts)
 
-    # если данных нет — показываем и выходим
-    if df[["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]].dropna(how="all").empty:
+    cols = ["vibration_mm_s", "bearing_temp_c", "motor_current_pu"]
+    if df[cols].dropna(how="all").empty:
         if state == "DOWN":
             st.warning("Оборудование в ремонте/ТО. Датчики отключены — телеметрия недоступна.")
         else:
             st.info("Нет телеметрии за период (нет связи/данных).")
         return
 
+    last_valid = _last_valid_row(df)
+    if last_valid is None:
+        # есть какие-то данные в целом, но после cutoff последние строки пустые — это ок
+        st.info("Телеметрия есть, но последние точки после отсечки пустые. Прокрутите период или смените станок.")
+        return
+
+    # --- считаем alarms/summary устойчиво, через “валидные” данные ---
+    # ВНИМАНИЕ: compute_alarms/summarize_telemetry в текущем simulator.py берут df.iloc[-1].
+    # Здесь мы передадим df без последних NA: обрежем по последнему валидному индексу.
+    last_ts = df[cols].dropna(how="any").index.max()
+    df_valid_tail = df.loc[:last_ts]
+
     thr = TelemetryThresholds()
-    alarms = compute_alarms(df, thr)
-    summary = summarize_telemetry(df)
+    alarms = compute_alarms(df_valid_tail, thr)
+    summary = summarize_telemetry(df_valid_tail)
 
     # --- E-STOP индикатор ---
     has_alarm = any(v == "alarm" for v in alarms.values())
@@ -327,13 +378,19 @@ def render_telemetry_panel(
 
     _render_estop(has_alarm, has_warn, hint)
 
-    def fmt(x: Any, fmt_str: str) -> str:
+    def fmt_num(x: Any, fmt_str: str) -> str:
         return "—" if pd.isna(x) else fmt_str.format(x)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Вибрация, мм/с", fmt(summary["vibration_last"], "{:.2f}"), _badge(alarms["vibration"]))
-    c2.metric("Температура, °C", fmt(summary["temp_last"], "{:.1f}"), _badge(alarms["temperature"]))
-    c3.metric("Ток, pu", fmt(summary["current_last"], "{:.2f}"), _badge(alarms["current"]))
+
+    c1.metric("Вибрация, мм/с", fmt_num(summary.get("vibration_last"), "{:.2f}"))
+    c1.caption(_badge(alarms.get("vibration", "ok")))
+
+    c2.metric("Температура, °C", fmt_num(summary.get("temp_last"), "{:.1f}"))
+    c2.caption(_badge(alarms.get("temperature", "ok")))
+
+    c3.metric("Ток, pu", fmt_num(summary.get("current_last"), "{:.2f}"))
+    c3.caption(_badge(alarms.get("current", "ok")))
 
     st.caption("Сигналы симулируются. В ADVANCED больше аномалий для демонстрации диагностики.")
 
@@ -352,4 +409,5 @@ def render_telemetry_panel(
                 "current_alarm": thr.current_alarm,
             }
         )
+
 

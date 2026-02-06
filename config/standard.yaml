@@ -10,3 +10,8 @@ economics:
   shift_hours: 8
   margin_per_unit: 0.18
   currency: USD
+integrations:
+  mode: erp
+  erp:
+    url: "http://127.0.0.1:8008"
+

@@ -1,7 +1,6 @@
-# app.py
 import os
 import json
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from uuid import uuid4
 
@@ -24,9 +23,6 @@ from src.ui import (
     render_telemetry_panel,
 )
 
-# NEW: единая точка доставки (BASIC->Google, STANDARD/ADVANCED->ERP)
-from src.integrations.dispatcher import dispatch_send_request
-
 
 # ============================
 # Helpers
@@ -40,7 +36,7 @@ def actions_to_list(actions):
     """
     out = []
     for a in actions or []:
-        if hasattr(a, "model_dump"):  # pydantic v2
+        if hasattr(a, "model_dump"):          # pydantic v2
             out.append(a.model_dump())
         elif isinstance(a, dict):
             out.append(a)
@@ -150,40 +146,6 @@ def build_telemetry_hint(machine_obj, cfg: dict, stops_list, economics: dict | N
     }
 
 
-def infer_priority(telemetry_hint: dict | None) -> str:
-    """
-    CRITICAL если есть alarm, иначе HIGH если warn, иначе MEDIUM.
-    """
-    if not telemetry_hint or telemetry_hint.get("status") != "OK":
-        return "MEDIUM"
-    alarms = telemetry_hint.get("alarms", {})
-    if any(v == "alarm" for v in alarms.values()):
-        return "CRITICAL"
-    if any(v == "warn" for v in alarms.values()):
-        return "HIGH"
-    return "MEDIUM"
-
-
-def integration_mode(cfg: dict) -> str:
-    """
-    'google' | 'erp'
-    Приоритет: integrations.mode
-    Совместимость: integrations.target == 'google_sheets' => google
-    """
-    integrations = cfg.get("integrations", {}) or {}
-    mode = integrations.get("mode")
-    if mode:
-        return str(mode).lower()
-
-    target = integrations.get("target", "")
-    if target == "google_sheets":
-        return "google"
-    return "erp"
-
-
-# ============================
-# Data model
-# ============================
 @dataclass
 class MaintenanceRequest:
     request_id: str
@@ -204,10 +166,19 @@ class MaintenanceRequest:
     ai: dict
     payload_for_erp: dict
 
-    # NEW: delivery info
-    delivery_target: str = "NONE"  # GOOGLE | ERP | NONE
-    external_ids: dict = field(default_factory=dict)  # {"erp_id": "...", "calendar_event_id": "...", ...}
-    delivery_error: str | None = None
+
+def infer_priority(telemetry_hint: dict | None) -> str:
+    """
+    CRITICAL если есть alarm, иначе HIGH если warn, иначе MEDIUM.
+    """
+    if not telemetry_hint or telemetry_hint.get("status") != "OK":
+        return "MEDIUM"
+    alarms = telemetry_hint.get("alarms", {})
+    if any(v == "alarm" for v in alarms.values()):
+        return "CRITICAL"
+    if any(v == "warn" for v in alarms.values()):
+        return "HIGH"
+    return "MEDIUM"
 
 
 # ============================
@@ -218,24 +189,10 @@ st.set_page_config(page_title="OEE Shopfloor Mnemo", layout="wide")
 config_path = os.environ.get("OEE_CONFIG", "config/basic.yaml")
 cfg = load_config(config_path)
 
-mode = integration_mode(cfg)
-level = cfg.get("level", "BASIC")
+st.title(f"Мнемосхема цеха — уровень {cfg['level']}")
+st.caption("Уровень оснащения задаётся конфигом. UI одинаковый для BASIC/STANDARD/ADVANCED.")
 
-st.title(f"Мнемосхема цеха — уровень {level}")
-st.caption(f"Режим интеграции: **{mode.upper()}**. UI одинаковый для BASIC/STANDARD/ADVANCED.")
-
-provider_name = cfg.get("provider")
-if not provider_name:
-    st.error("В YAML нет ключа `provider`. Допустимо: mock_basic | mes_standard_stub | iot_advanced_stub")
-    st.stop()
-
-try:
-    provider = get_provider(provider_name)
-except ValueError as e:
-    st.error(str(e))
-    st.info("Допустимые provider: mock_basic | mes_standard_stub | iot_advanced_stub")
-    st.stop()
-
+provider = get_provider(cfg["provider"])
 machines = provider.get_overview()
 
 if not machines:
@@ -254,8 +211,6 @@ if "ai_error" not in st.session_state:
     st.session_state.ai_error = None
 if "last_telemetry_hint" not in st.session_state:
     st.session_state.last_telemetry_hint = None
-if "last_delivery" not in st.session_state:
-    st.session_state.last_delivery = None
 
 left, right = st.columns([2, 1], gap="large")
 
@@ -436,51 +391,9 @@ with right:
                 },
             )
 
-            # сохраняем локально (история)
             st.session_state.maintenance_requests.insert(0, req)
+            st.success(f"Заявка создана: {req.request_id}")
 
-            # NEW: доставка по режиму (BASIC->Google, STANDARD/ADVANCED->ERP)
-            try:
-                delivery = dispatch_send_request(req, cfg)
-                st.session_state.last_delivery = delivery
-
-                req.delivery_target = str(delivery.get("target", "NONE")).upper()
-
-                # Соберём external ids удобно
-                ext = {}
-                if delivery.get("target") == "erp":
-                    ext["erp_id"] = delivery.get("erp_id")
-                    ext["erp_url"] = delivery.get("erp_url")
-                elif delivery.get("target") == "google":
-                    # sheets block
-                    sheets = delivery.get("sheets", {}) or {}
-                    ext["spreadsheet_id"] = sheets.get("spreadsheet_id")
-                    ext["worksheet"] = sheets.get("worksheet")
-                    # calendar block
-                    cal = delivery.get("calendar", {}) or {}
-                    ext["calendar_id"] = cal.get("calendar_id")
-                    ext["calendar_event_id"] = cal.get("calendar_event_id")
-                    ext["calendar_link"] = cal.get("htmlLink")
-
-                req.external_ids = ext
-                req.delivery_error = None
-
-                if req.delivery_target == "ERP":
-                    st.success(f"Заявка создана и отправлена в ERP ✅ ERP_ID={ext.get('erp_id')}")
-                elif req.delivery_target == "GOOGLE":
-                    st.success(
-                        "Заявка создана и отправлена в Google ✅ "
-                        f"event_id={ext.get('calendar_event_id')}"
-                    )
-                else:
-                    st.success("Заявка создана ✅")
-
-            except Exception as e:
-                req.delivery_target = "NONE"
-                req.delivery_error = str(e)
-                st.warning(f"Заявка создана, но доставка не удалась: {e}")
-
-        # Show last request summary
         if st.session_state.maintenance_requests:
             last_req = st.session_state.maintenance_requests[0]
 
@@ -492,58 +405,61 @@ with right:
             if last_req.estimated_loss is not None and last_req.currency:
                 st.write(f"- What-if потери: **{last_req.estimated_loss:,.2f} {last_req.currency}**")
 
-            st.write(f"- Доставка: **{last_req.delivery_target}**")
-            if last_req.external_ids:
-                st.json(last_req.external_ids)
-            if last_req.delivery_error:
-                st.error(last_req.delivery_error)
-
             with st.expander("JSON заявки (для интеграции/1С)"):
                 st.code(json.dumps(asdict(last_req), ensure_ascii=False, indent=2), language="json")
 
-    # ============================
-    # Integration panels (view-only)
-    # ============================
+    # ERP integration
+    ERP_URL = os.environ.get("ERP_URL", "http://127.0.0.1:8008")
     st.divider()
-    if mode == "erp":
-        st.subheader("Интеграция с ERP/1С (MOCK API)")
-        st.caption(f"ERP endpoint: {ERP_URL}")
+    st.subheader("Интеграция с ERP/1С (MOCK API)")
+    st.caption(f"ERP endpoint: {ERP_URL}")
 
-        # оставим “инбокс” как debug
-        if st.button("Показать inbox ERP", use_container_width=True):
+    if st.session_state.maintenance_requests:
+        last_req = st.session_state.maintenance_requests[0]
+
+        colA, colB = st.columns([1, 1])
+        with colA:
+            send = st.button("Отправить заявку в ERP", use_container_width=True)
+
+        if send:
             try:
-                r = requests.get(f"{ERP_URL}/api/v1/inbox", timeout=6)
+                payload = last_req.payload_for_erp
+
+                body = {
+                    "request_id": last_req.request_id,
+                    "created_at": last_req.created_at,
+                    "machine_id": last_req.machine_id,
+                    "priority": last_req.priority,
+                    "work_type": payload.get("work_type", "Диагностика"),
+                    "comment": payload.get("comment", ""),
+                    "telemetry": payload.get("telemetry", {}),
+                    "economics": payload.get("economics", {}),
+                    "ai": last_req.ai,
+                }
+
+                r = requests.post(f"{ERP_URL}/api/v1/maintenance_requests", json=body, timeout=8)
                 r.raise_for_status()
-                st.json(r.json())
+                resp = r.json()
+
+                st.success(f"Отправлено в ERP ✅ ERP_ID = {resp.get('erp_id')}")
             except Exception as e:
-                st.error(f"Не удалось прочитать inbox: {e}")
+                st.error(f"Не удалось отправить в ERP: {e}")
+
+        with colB:
+            if st.button("Показать inbox ERP", use_container_width=True):
+                try:
+                    r = requests.get(f"{ERP_URL}/api/v1/inbox", timeout=6)
+                    r.raise_for_status()
+                    st.json(r.json())
+                except Exception as e:
+                    st.error(f"Не удалось прочитать inbox: {e}")
     else:
-        st.subheader("Интеграция (Google)")
-        st.caption("BASIC: заявка → Google Sheets, график ТО → Google Calendar.")
-        if st.session_state.last_delivery:
-            st.json(st.session_state.last_delivery)
+        st.info("Заявок ещё нет — сначала создайте заявку ТО.")
 
-# ============================
-# ERP Status block (ONLY if mode=erp and last request delivered to ERP)
-# ============================
-st.divider()
-st.subheader("Статус заявки")
+if st.session_state.maintenance_requests:
+    last_req = st.session_state.maintenance_requests[0]
 
-if not st.session_state.maintenance_requests:
-    st.info("Заявок ещё нет — сначала создайте заявку ТО.")
-    st.stop()
-
-last_req = st.session_state.maintenance_requests[0]
-
-if mode != "erp":
-    st.info("Статусы доступны только в режимах STANDARD/ADVANCED (mode=erp).")
-    st.stop()
-
-if last_req.delivery_target != "ERP":
-    st.info("Заявка ещё не доставлена в ERP — статусы недоступны.")
-    if last_req.delivery_error:
-        st.error(last_req.delivery_error)
-    st.stop()
+st.subheader("Статус заявки (в ERP)")
 
 # подтянуть текущий статус из ERP
 try:
@@ -554,7 +470,7 @@ try:
         st.write(f"Текущий статус: **{current_status}** (ERP_ID: `{doc.get('erp_id')}`)")
     else:
         current_status = "—"
-        st.caption("Заявка ещё не найдена в ERP (возможна задержка/ошибка).")
+        st.caption("Заявка ещё не отправлена в ERP (или не найдена).")
         doc = None
 except Exception as e:
     current_status = "—"
@@ -585,8 +501,3 @@ if st.button("Показать историю статусов", use_container_w
         st.json(rr.json())
     except Exception as e:
         st.error(f"Не удалось получить историю: {e}")
-
-
-
-
-

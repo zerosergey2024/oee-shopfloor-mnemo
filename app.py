@@ -25,14 +25,13 @@ from src.ui import (
     render_machine_panel,
     render_telemetry_panel,
 )
-
 # NEW: единая точка доставки (BASIC->Google, STANDARD/ADVANCED->ERP)
 from src.integrations.dispatcher import dispatch_send_request
+import subprocess
+import sys
+from pathlib import Path
+import streamlit as st
 
-
-# ============================
-# Helpers
-# ============================
 def actions_to_list(actions):
     """
     Универсально приводим actions к list[dict]:
@@ -293,22 +292,42 @@ with right:
         render_telemetry_panel(selected, cfg, stops)
 
     # Economics (what-if)
+    # ============================
     st.divider()
     st.subheader("What-if: простой / потери")
 
-    eco_cfg = cfg.get("economics", {})
-    planned_units = float(eco_cfg.get("planned_units_per_shift", 0) or 0)
-    shift_hours = float(eco_cfg.get("shift_hours", 8) or 8)
-    margin = float(eco_cfg.get("margin_per_unit", 0) or 0)
-    currency = eco_cfg.get("currency", "USD")
+    eco_cfg = cfg.get("economics", {}) or {}
 
-    hours_stop = st.number_input("Если остановить на (часов)", min_value=0.0, value=2.0, step=0.5)
+
+    def _f(x, default=0.0) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+
+    planned_units = _f(eco_cfg.get("planned_units_per_shift"), 0.0)
+    shift_hours = _f(eco_cfg.get("shift_hours"), 8.0) or 8.0
+    margin = _f(eco_cfg.get("margin_per_unit"), 0.0)
+    currency = str(eco_cfg.get("currency", "USD"))
+
+    # ключ уникальный для уровня/режима/станка
+    hours_key = f"hours_stop::{level}::{mode}::{selected.machine_id}"
+    st.session_state.setdefault(hours_key, 2.0)
+
+    hours_stop = st.number_input(
+        "Если остановить на (часов)",
+        min_value=0.0,
+        step=0.5,
+        key=hours_key,
+    )
+
     units_per_hour = (planned_units / shift_hours) if shift_hours > 0 else 0.0
-    estimated_loss = units_per_hour * margin * hours_stop
+    estimated_loss = units_per_hour * margin * float(hours_stop)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("План/смена", f"{planned_units:,.0f} шт")
-    c2.metric("Производительность", f"{units_per_hour:,.0f} шт/ч")
+    c2.metric("Производительность", f"{units_per_hour:,.2f} шт/ч")
     c3.metric("Потери (what-if)", f"{estimated_loss:,.2f} {currency}")
 
     economics = {
@@ -440,6 +459,7 @@ with right:
 
             # сохраняем локально (история)
             st.session_state.maintenance_requests.insert(0, req)
+            st.session_state.last_delivery = None
 
             # NEW: доставка по режиму (BASIC->Google, STANDARD/ADVANCED->ERP)
             try:

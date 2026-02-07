@@ -62,7 +62,6 @@ def write_exchange_file(req: Any, config: dict) -> Dict[str, Any]:
 def send_to_erp_api(req: Any, config: dict) -> Dict[str, Any]:
     erp_url = _resolve_erp_url(config)
 
-    # Берём "плоское" тело, которое ожидает твой Mock ERP API
     payload_for_erp = getattr(req, "payload_for_erp", {}) or {}
     body = {
         "request_id": getattr(req, "request_id", None),
@@ -77,6 +76,22 @@ def send_to_erp_api(req: Any, config: dict) -> Dict[str, Any]:
     }
 
     r = requests.post(f"{erp_url}/api/v1/maintenance_requests", json=body, timeout=8)
+
+    if r.status_code == 409:
+        # Уже есть в ERP: считаем успехом и читаем документ
+        rr = requests.get(f"{erp_url}/api/v1/maintenance_requests/{body['request_id']}", timeout=6)
+        rr.raise_for_status()
+        doc = rr.json()
+        return {
+            "ok": True,
+            "target": "erp_api",
+            "erp_url": erp_url,
+            "erp_id": doc.get("erp_id"),
+            "received_at": doc.get("received_at"),
+            "status": doc.get("status", "NEW"),
+            "note": "ALREADY_EXISTS",
+        }
+
     r.raise_for_status()
     resp = r.json()
 
@@ -88,7 +103,6 @@ def send_to_erp_api(req: Any, config: dict) -> Dict[str, Any]:
         "received_at": resp.get("received_at"),
         "status": resp.get("status", "NEW"),
     }
-
 
 def dispatch_erp_1c(req: Any, config: dict) -> Dict[str, Any]:
     # 1) обязательно пишем файл в exchange/outbox
